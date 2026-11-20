@@ -1,7 +1,12 @@
 # Chaos Gate Asset Editor
 
-Local modding editor for Warhammer 40,000: Chaos Gate – Daemonhunters.
+A local modding editor for Warhammer 40,000: Chaos Gate – Daemonhunters.
 
-Download the bundled Linux ZIP from [Releases](../../releases), extract it, and run `python3 Editor/editor.py` with CPython 3.14 on x86-64 Linux.
+Download a standalone ZIP for Windows x64 or Linux x86-64 from [Releases](../../releases). Both bundles include Python and UnityPy.
 
-See [the editor guide](Editor/README.md) for setup, controls, and GameAssembly patch instructions. The editor source is licensed under [GPL-2.0-only](LICENSE).
+- **Windows:** Extract the ZIP and double-click `Editor/Start-Editor.cmd`.
+- **Linux:** Extract the ZIP and run `sh Editor/start-editor.sh`.
+
+See [the user guide](Editor/README.md) for choosing a game folder, editing perks and abilities, and installing or reverting the shared-equipment patch.
+
+The editor source is licensed under [GPL-2.0-only](LICENSE).

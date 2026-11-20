@@ -1,50 +1,72 @@
 # Chaos Gate Asset Editor
 
-Start the editor from the project directory.
+Edit classes, skill trees, abilities, upgrades, and weapons for Warhammer 40,000: Chaos Gate – Daemonhunters. The editor runs locally in your browser and reads game data and English localization from your installation.
 
-```sh
-python3 Editor/editor.py
+## Quick start
+
+Download the archive for your system from [GitHub Releases](https://github.com/Madcliff/chaos-gate-editor/releases). Extract the entire archive to a folder you can write to. Keep the bundled runtime and vendor folders together with the editor.
+
+| Platform | Archive | Start the editor |
+|---|---|---|
+| Windows x64 | `windows-x64-standalone.zip` | Double-click `Editor/Start-Editor.cmd`. |
+| Linux x86-64 | `linux-x86_64-standalone.zip` | Run `sh Editor/start-editor.sh` from the extracted folder. |
+
+The standalone ZIPs include Python, UnityPy, and their required packages. You need the installed game and a browser. The older v0.1.0 Linux ZIP uses system CPython 3.14.
+
+Keep the launcher window open while editing. Open the printed loopback URL if your browser does not open automatically. For a custom Steam library, choose the ChaosGate folder in the dialog, or launch with `--game-dir "path to ChaosGate" --save-settings`. Add `--browse` to pick a different folder. The **Paths** section shows the active game and output folders.
+
+```bat
+Editor\Start-Editor.cmd --game-dir "D:\SteamLibrary\steamapps\common\ChaosGate" --save-settings
 ```
 
-The editor opens the browser automatically. If another program uses its default port, it picks a free one and prints the address. Use `--no-browser` to print the address only. The editor reads `data_assets` and `localization/english` directly from the standard Linux Steam installation. UnityPy 1.25.4 and its dependencies are bundled in the editor’s `vendor` directory. Keep that directory beside `editor.py`. This build uses CPython 3.14 on x86-64 Linux.
-
-For a different installation, pass its directory.
-
 ```sh
-python3 Editor/editor.py --game-dir "/path/to/ChaosGate" --save-settings
+sh Editor/start-editor.sh --game-dir "/games/SteamLibrary/steamapps/common/ChaosGate" --save-settings
 ```
 
-You can also point to the `bundles` directory directly, or set `CHAOS_GATE_GAME_DIR` in your shell to reuse a directory across launches.
+Linux folder selection uses Zenity or KDialog when available. A typed path works without a picker. **Open output folder** uses Explorer on Windows and the default file manager on Linux.
 
-1. Choose **Skill trees**, select a class, and click a perk. The columns group perks by prerequisite depth.
-2. Edit the perk's prerequisites, granted abilities, and upgrades by ID. Use the editable fields for other properties. Expand **Raw JSON** when you need to edit the serialized data directly.
-3. Click **Stage edit** to queue a change. To add a perk, enter a new asset ID and click **Stage clone**. Select the staged clone in the tree to revise it.
-4. Click **Save to output folder** to write all staged changes to `Editor/out/data_assets`, or **Download bundle** for a browser download. Saving again replaces the output with the current staged changes applied to the source. Staging lasts until the page reloads.
+## Edit a perk or ability
 
-The other asset views let you edit class, ability, upgrade, and weapon fields. Ability and weapon records can also be cloned. Clone IDs need separate localization entries if the game looks up their display text by ID.
+1. Choose **Skill trees** and pick a class. Select a perk to see its prerequisites, granted abilities, and upgrades.
+2. Use the dropdowns to make changes. Perk prerequisites come from the owner class. Related fields display localized names where available.
+3. Choose **Stage edit** to edit the selected perk. To make a new perk, enter a unique ID such as `MyMod_TechMarine_ExtraPerk`, then choose **Stage clone**.
+4. To edit an ability, choose the corresponding ability or upgrade view. Change its fields and stage the edit or clone. To grant a staged clone, select it in the perk's ability or upgrade list.
+5. Choose **Save to output folder** or **Download bundle**. Staging lasts until you reload the tab. Saving again builds from the selected game source and the edits currently staged.
 
-The exporter reopens the generated bundle to verify its index and changed assets. The game files are read-only inputs. Game installation and in-game testing are separate steps. In particular, an exported perk beyond the base tree still needs to be tested on the promotion screen, and cloned weapons still need to be tested for availability.
+**Raw JSON** exposes custom values and empty lists with no known example. Unity PathIDs are stored as strings in that view. Select an asset to see available English text, or choose **Download localization JSON** to inspect the tables. Localization preview is read-only.
 
-Select an asset to see matching localization keys and text, or click **Download localization JSON** to extract the English tables from the selected game directory.
+### Install and undo an asset edit
 
-Asset references and fields with known game values use dropdowns. Perk prerequisites are scoped to the selected owner class. The editor uses translated names where available and retains internal IDs in the option labels. Lists with an example in the game data can be started from the form. Raw JSON remains available for fields without an example and for custom values.
+Close the game. Back up `ChaosGate_Data/StreamingAssets/bundles/data_assets` from the installation, and place the exported `Editor/out/data_assets` at that path. To undo the edit, close the game and restore the backup. Test on a separate campaign save when adding new IDs. Export verifies the bundle structure. Visibility of extra perks on the promotion screen and availability of cloned weapons still require in-game testing.
 
-Open **Patches** and choose **Build patched GameAssembly.dll** to enable shared special equipment. The editor checks the Steam build 0706ef9 DLL against the known original and writes a verified copy to `Editor/out/shared-equipment/GameAssembly.dll`. It reports when the source already contains the patch.
+## Share special weapons and armour
 
-## Paths and folder picker
+1. Open **Patches** and leave **Skip the equipment transfer prompt** checked if you want direct assignment. Clear it to keep the confirmation.
+2. Click **Build patched GameAssembly.dll**. The editor verifies the known Steam build `0706ef9` and writes `Editor/out/shared-equipment/GameAssembly.dll`.
+3. Close the game and back up its original `GameAssembly.dll` from the ChaosGate installation root. Copy the generated DLL to that location.
+4. Relaunch and equip the same eligible special item on two knights. Confirm both keep it.
 
-On launch the editor checks common Linux Steam install paths, including Flatpak Steam. Run `python3 Editor/editor.py --browse` to choose a folder and remember it in `Editor/chaos-gate.json`. The picker uses Zenity or KDialog when available. **Paths** in the editor shows the active bundle and output folders and opens the output in your file manager using `xdg-open`.
+To undo the patch, close the game and restore the original DLL. Steam verification or an update can also replace the patched DLL. The transfer patch was observed to preserve the other knight's weapon. The prompt bypass was verified in the generated DLL and still needs in-game confirmation.
 
-## Shared equipment patch
+## Troubleshooting
 
-**Skip the equipment transfer prompt** is checked by default. With it enabled, selecting eligible gear already equipped by another knight takes the regular assignment path. The shared-equipment patch suppresses the transfer that would remove gear from the first knight. Clear the checkbox if you want to keep the prompt.
-
-To install, close the game, back up the original `GameAssembly.dll`, then copy the generated DLL into the game directory. To revert, close the game and restore that backup. Patch generation supports the verified Steam build `0706ef9`. Check that both knights retain the same gear when you select it in-game.
-
-## Release archive
-
-Extract the ZIP and keep the `Editor` directory intact. It contains the editor, UnityPy and its bundled dependencies, and their upstream notices in `Editor/vendor`. The archive uses CPython 3.14 on x86-64 Linux. It reads the asset and English localization bundles from your installation. The optional FMOD audio runtime is outside the scope of the editor and excluded from the archive.
+- **Blank editor or missing assets.** Start through the launcher and open the printed HTTP address. Opening `index.html` directly cannot load the local catalog.
+- **Game folder rejected.** Choose the folder containing `ChaosGate_Data`, or point directly to its `StreamingAssets/bundles` folder. Check that `data_assets` and `localization/english` are present.
+- **Browser address changed.** If another program uses port 8765, the editor picks an available port. Use the address printed in the launcher window.
+- **Unsupported DLL build.** The patch generator expects build `0706ef9` with the known DLL contents. Asset editing uses the installed bundles independently of DLL patch generation.
+- **A staged edit disappeared.** Save or download the bundle before closing or refreshing the tab.
 
 ## License
 
-The editor source is licensed under GNU GPL version 2.0 only. See [LICENSE](LICENSE). Bundled dependencies retain their upstream licenses and notices in `vendor`.
+The editor source is licensed under [GNU GPL version 2.0 only](LICENSE). Bundled dependencies and runtimes retain their upstream licenses. The archive contains the tool and runtime. It reads the game files from your installation.
+
+## Build the release archives
+
+From a development copy with the Linux UnityPy vendor directory, run the packaging script with the Windows x64 CPython 3.14 embeddable ZIP, the matching Windows x64 UnityPy dependency wheels, and the x86-64 GNU/Linux CPython 3.14 install-only runtime tarball. The release uses CPython 3.14.10.
+
+```sh
+python3 Editor/build_release.py --windows-runtime /path/to/python-embed.zip \
+  --windows-wheels /path/to/wheels --linux-runtime /path/to/python-install-only.tar.gz
+```
+
+The Windows runtime comes from [Python.org](https://www.python.org/downloads/release/python-31410/). The Linux runtime comes from [python-build-standalone](https://github.com/astral-sh/python-build-standalone/releases/tag/20261110). Keep the upstream license files in both packages. The build script writes ZIPs and SHA-256 checksums under `dist/`.

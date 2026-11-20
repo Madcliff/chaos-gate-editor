@@ -23,9 +23,9 @@ ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
 if VENDOR.is_dir():
     if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 14) or (
-        sys.platform, platform.machine()
-    ) != ("linux", "x86_64"):
-        raise SystemExit("The bundled UnityPy requires CPython 3.14 on x86-64 Linux.")
+        sys.platform, platform.machine().lower()
+    ) not in {("linux", "x86_64"), ("win32", "amd64"), ("win32", "x86_64")}:
+        raise SystemExit("The bundled UnityPy requires the matching x64 Windows or Linux CPython 3.14 runtime.")
     sys.path.insert(0, str(VENDOR))
 
 import UnityPy
@@ -349,12 +349,15 @@ def serve(source, port, localization, open_browser=False):
                 return
             try:
                 if self.path == "/open-output":
-                    opener = shutil.which("xdg-open")
-                    if not opener:
-                        raise ValueError(f"Open {OUTPUT.parent} in your file manager.")
                     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-                    subprocess.Popen([opener, str(OUTPUT.parent)], stdout=subprocess.DEVNULL,
-                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                    if sys.platform == "win32":
+                        os.startfile(OUTPUT.parent)
+                    else:
+                        opener = shutil.which("xdg-open")
+                        if not opener:
+                            raise ValueError(f"Open {OUTPUT.parent} in your file manager.")
+                        subprocess.Popen([opener, str(OUTPUT.parent)], stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL, start_new_session=True)
                     self.reply(200, b"Opened output folder", "text/plain; charset=utf-8")
                     return
                 if self.path == "/patch/shared-equipment":
@@ -400,15 +403,42 @@ def game_files(directory):
 
 
 def discover_game_dir():
-    steam_paths = (
-        DEFAULT_GAME_DIR,
-        Path.home() / ".steam/steam/steamapps/common/ChaosGate",
-        Path.home() / ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/ChaosGate",
-    )
+    if sys.platform == "win32":
+        import winreg
+
+        steam_roots = [Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Steam"]
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+                steam_roots.insert(0, Path(winreg.QueryValueEx(key, "SteamPath")[0]))
+        except OSError:
+            pass
+        steam_paths = [root / "steamapps/common/ChaosGate" for root in steam_roots]
+    else:
+        steam_paths = (
+            DEFAULT_GAME_DIR,
+            Path.home() / ".steam/steam/steamapps/common/ChaosGate",
+            Path.home() / ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/ChaosGate",
+        )
     return next((path for path in steam_paths if (path / BUNDLE_SUBDIR / "data_assets").is_file()), None)
 
 
 def choose_game_dir(start):
+    if sys.platform == "win32":
+        script = """
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            Add-Type -AssemblyName System.Windows.Forms
+            $picker = New-Object System.Windows.Forms.FolderBrowserDialog
+            $picker.Description = 'Choose the ChaosGate game folder'
+            $picker.SelectedPath = $env:CHAOS_GATE_PICKER_START
+            if ($picker.ShowDialog() -eq 'OK') { [Console]::Write($picker.SelectedPath) }
+            else { exit 1 }
+        """
+        env = dict(os.environ, CHAOS_GATE_PICKER_START=str(start))
+        command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", env=env)
+        if result.returncode or not result.stdout:
+            raise ValueError("No game folder selected. Use --game-dir to enter the path.")
+        return Path(result.stdout.strip())
     if shutil.which("zenity"):
         command = ["zenity", "--file-selection", "--directory", "--title=Choose the ChaosGate game folder",
                    "--filename=" + str(start) + "/"]
@@ -453,7 +483,7 @@ if __name__ == "__main__":
             directory = json.loads(SETTINGS.read_text())["game_dir"]
         directory = directory or discover_game_dir()
         if args.browse or (not directory and not args.no_browser and
-                           (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
+                           (sys.platform == "win32" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))):
             directory = choose_game_dir(Path(directory or Path.home()).expanduser())
             args.save_settings = True
         directory = Path(directory or DEFAULT_GAME_DIR).expanduser().resolve()
@@ -467,7 +497,7 @@ if __name__ == "__main__":
         try:
             serve(source, port, localization, not args.no_browser)
         except OSError as error:
-            if error.errno != errno.EADDRINUSE:
+            if error.errno != errno.EADDRINUSE and getattr(error, "winerror", None) != 10048:
                 raise
             existing = running_editor(port)
             if existing == str(source):
