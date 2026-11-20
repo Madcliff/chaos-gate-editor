@@ -1,0 +1,556 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chaos Gate Asset Editor</title>
+<style>
+:root { color-scheme: dark; font: 15px system-ui; background: #121419; color: #ebedf2; }
+* { box-sizing: border-box; }
+body { margin: auto; max-width: 1560px; padding: 24px; }
+header, .controls, .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+header { justify-content: space-between; border-bottom: 1px solid #373b46; margin-bottom: 18px; }
+h1 { font-size: 25px; } h2 { font-size: 17px; overflow-wrap: anywhere; }
+button, select, input, textarea { font: inherit; color: inherit; background: #252933; border: 1px solid #484f5f; border-radius: 5px; padding: 8px; }
+button { cursor: pointer; } button:hover { border-color: #d9b680; }
+button:disabled { opacity: .45; cursor: default; }
+.primary { color: #1a1510; background: #d9b680; font-weight: 700; }
+main { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(300px, 1fr); gap: 18px; margin-top: 16px; }
+section { background: #191c23; border: 1px solid #373b46; border-radius: 8px; padding: 14px; min-width: 0; }
+#assets { display: flex; align-items: flex-start; gap: 10px; overflow: auto; max-height: 72vh; }
+.column { min-width: 180px; display: grid; gap: 7px; }
+.column strong { color: #c9a877; font-size: 13px; }
+.node { text-align: left; overflow-wrap: anywhere; width: 100%; }
+.node small { display: block; color: #b8c0d1; margin-top: 4px; }
+.node[aria-current="true"] { border-color: #e6b875; background: #3a3024; }
+#fields { width: 100%; min-height: 320px; height: 43vh; font: 13px ui-monospace, monospace; resize: vertical; }
+#cloneName { min-width: 0; flex: 1; }
+#status { min-height: 1.5em; overflow-wrap: anywhere; }
+.translation { white-space: pre-wrap; overflow-wrap: anywhere; }
+.translation small { display: block; color: #b8c0d1; }
+header a { color: #d9b680; }
+label { display: block; margin: 8px 0; }
+#assetForm input:not([type=checkbox]), #assetForm select { width: 100%; }
+#assetForm input[type=checkbox] { margin-right: 8px; }
+#assetForm select { text-overflow: ellipsis; }
+#assetForm fieldset > button + button { margin-left: 8px; }
+#assetForm fieldset { border: 1px solid #484f5f; border-radius: 5px; margin: 10px 0; min-width: 0; }
+#assetForm legend { overflow-wrap: anywhere; }
+#assetForm { max-height: 58vh; overflow: auto; padding-right: 8px; }
+summary { cursor: pointer; margin: 10px 0; }
+#patches { margin-bottom: 18px; }
+#pathsPanel code { overflow-wrap: anywhere; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; } #assets { max-height: 44vh; } }
+</style>
+<header>
+  <h1>Chaos Gate Asset Editor</h1>
+  <a id="downloadText" href="/localization.json" hidden>Download localization JSON</a>
+  <div class="actions">
+    <button id="apply" class="primary" disabled>Save to output folder</button>
+    <button id="export" disabled>Download bundle</button>
+  </div>
+</header>
+<details id="pathsPanel">
+  <summary>Paths</summary>
+  <section>
+    <p>Game bundles <code id="gamePath"></code></p>
+    <p>Output folder <code id="outputPath"></code></p>
+    <button type="button" id="openOutput" disabled>Open output folder</button>
+    <p id="pathStatus" role="status"></p>
+    <p>Launch with <code>--browse</code> to choose and remember a different game folder.</p>
+  </section>
+</details>
+<details id="patches">
+  <summary>Patches</summary>
+  <section aria-labelledby="sharedEquipmentTitle">
+    <h2 id="sharedEquipmentTitle">Shared special equipment</h2>
+    <p>Allow multiple knights to equip the same special weapon or armour.</p>
+    <label><input type="checkbox" id="skipEquipmentPrompt" checked> Skip the equipment transfer prompt</label>
+    <button type="button" id="patchEquipment" disabled>Build patched GameAssembly.dll</button>
+    <p id="patchStatus" role="status">The patched copy goes to <code>Editor/out/shared-equipment/</code>.</p>
+  </section>
+</details>
+<div class="controls">
+  <select id="kind" aria-label="Asset type">
+    <option value="ClassPerksData">Skill trees</option>
+    <option value="ClassData">Classes</option>
+    <option value="ActiveAbilityData">Active abilities</option>
+    <option value="PassiveAbilityData">Passive abilities</option>
+    <option value="AutoAbilityData">Automatic abilities</option>
+    <option value="AbilityUpgradeData">Ability upgrades</option>
+    <option value="WeaponData">Weapons</option>
+  </select>
+  <select id="owner" aria-label="Class"></select>
+  <input id="search" type="search" placeholder="Filter by name" aria-label="Filter by name">
+</div>
+<main>
+  <section id="assets" aria-label="Assets"></section>
+  <section>
+    <h2 id="title">Select an asset</h2>
+    <div id="localized"></div>
+    <form id="assetForm" aria-label="Asset properties"></form>
+    <details id="jsonPanel" hidden>
+      <summary>Raw JSON</summary>
+      <textarea id="fields" aria-label="Raw asset JSON" spellcheck="false" disabled></textarea>
+    </details>
+    <div class="actions">
+      <button id="stage" disabled>Stage edit</button>
+      <button id="discard" disabled>Discard staged edit</button>
+    </div>
+    <label for="cloneName">New asset ID</label>
+    <div class="actions">
+      <input id="cloneName" spellcheck="false" placeholder="MyMod_NewPerk">
+      <button id="clone" disabled>Stage clone</button>
+    </div>
+    <p id="status" role="status">Loading assets…</p>
+  </section>
+</main>
+<script>
+const byId = id => document.getElementById(id);
+const [kind, owner, search, assets, title, fields, stage, discard, cloneName, clone, status, exportButton, assetForm, jsonPanel] =
+  ['kind','owner','search','assets','title','fields','stage','discard','cloneName','clone','status','export','assetForm','jsonPanel'].map(byId);
+let records, token, translations, referenceNames, selected, baseline, exporting = false;
+const changes = new Map();
+const name = record => record.data.m_Name;
+const ownerId = record => record.data.ownerClass?.m_PathID;
+const keys = (data, field) => (data[field] || []).map(item => item.key);
+function localizedKeys(record) {
+  const {kind, data} = record;
+  const id = data.id || data.m_Name;
+  const candidates = {
+    ClassPerksData: ['Title', 'SubTitle', 'Description'].map(field => 'CLASS_PERK_' + id + '_' + field),
+    WeaponData: ['EQUIPMENT_' + id],
+    AbilityUpgradeData: ['ABILITY_UPGRADE_DESC_' + id],
+  }[kind] || ['ABILITY_NAME_' + id, 'ABILITY_DESC_' + id];
+  for (const [field, value] of Object.entries(data)) {
+    if (/key$/i.test(field) && typeof value === 'string' && value) candidates.push(value);
+  }
+  if (kind === 'ClassPerksData') {
+    candidates.push(...keys(data, 'upgrades').map(key => 'ABILITY_UPGRADE_DESC_' + key));
+    candidates.push(...keys(data, 'abilities').map(key => 'ABILITY_DESC_' + key));
+  }
+  return [...new Set(candidates)].filter(key => Object.hasOwn(translations, key) && translations[key]);
+}
+const current = id => {
+  const change = changes.get(id);
+  const original = records[change?.source || id];
+  return change ? {kind: original.kind, data: change.data} : original;
+};
+function feedback(message = '') {
+  status.textContent = message;
+  exportButton.textContent = 'Download bundle (' + changes.size + ')';
+  exportButton.disabled = byId('apply').disabled = exporting || !changes.size;
+}
+function showAssets() {
+  owner.hidden = kind.value !== 'ClassPerksData';
+  assets.replaceChildren();
+  const ids = [...new Set([...Object.keys(records), ...changes.keys()])]
+    .filter(id => {
+      const record = current(id);
+      return record.kind === kind.value && (owner.hidden || ownerId(record) === owner.value);
+    })
+    .sort((a, b) => name(current(a)).localeCompare(name(current(b))));
+  const tree = new Map(ids.map(id => [current(id).data.id, current(id).data]));
+  const depths = new Map();
+  function depth(key, visiting = new Set()) {
+    if (depths.has(key)) return depths.get(key);
+    if (visiting.has(key) || !tree.has(key)) return 0;
+    visiting.add(key);
+    const parents = keys(tree.get(key), 'prerequisites').filter(parent => tree.has(parent));
+    const result = parents.length ? 1 + Math.max(...parents.map(parent => depth(parent, visiting))) : 0;
+    visiting.delete(key);
+    depths.set(key, result);
+    return result;
+  }
+  const groups = new Map();
+  for (const id of ids) {
+    const record = current(id);
+    const terms = [name(record), ...localizedKeys(record).map(key => translations[key])];
+    if (!terms.some(term => term.toLowerCase().includes(search.value.toLowerCase()))) continue;
+    const column = owner.hidden ? 0 : depth(record.data.id);
+    if (!groups.has(column)) groups.set(column, []);
+    groups.get(column).push(id);
+  }
+  for (const [level, group] of [...groups].sort((a, b) => a[0] - b[0])) {
+    const column = document.createElement('div');
+    column.className = 'column';
+    if (!owner.hidden) {
+      const heading = document.createElement('strong');
+      heading.textContent = level ? 'Depth ' + level : 'Starting perks';
+      column.append(heading);
+    }
+    for (const id of group) {
+      const data = current(id).data;
+      const button = document.createElement('button');
+      button.className = 'node';
+      button.textContent = data.m_Name + (changes.has(id) ? ' •' : '');
+      button.setAttribute('aria-current', String(selected === id));
+      const prerequisites = keys(data, 'prerequisites');
+      if (prerequisites.length) {
+        const detail = document.createElement('small');
+        detail.textContent = 'Requires ' + prerequisites.join(', ');
+        button.append(detail);
+      }
+      button.onclick = () => {
+        if (fields.value !== baseline && !confirm('Discard unstaged field changes?')) return;
+        select(id);
+      };
+      column.append(button);
+    }
+    assets.append(column);
+  }
+  if (!groups.size) assets.textContent = 'No matching assets.';
+}
+function select(id) {
+  selected = id;
+  const record = current(id);
+  title.textContent = name(record);
+  const localized = byId('localized');
+  localized.replaceChildren();
+  for (const key of localizedKeys(record)) {
+    const line = document.createElement('p');
+    line.className = 'translation';
+    const label = document.createElement('small');
+    label.textContent = key;
+    line.append(label, translations[key]);
+    localized.append(line);
+  }
+  baseline = fields.value = JSON.stringify(record.data, null, 2);
+  fields.disabled = stage.disabled = false;
+  discard.disabled = !changes.has(id);
+  clone.disabled = record.kind === 'ClassData' || !records[id];
+  jsonPanel.hidden = false;
+  showFields();
+  showAssets();
+}
+const abilityKinds = new Set(['ActiveAbilityData', 'PassiveAbilityData', 'AutoAbilityData']);
+const categories = {
+  prerequisites: 'Prerequisites', abilities: 'Granted abilities', upgrades: 'Granted upgrades',
+  m_Name: 'Asset name', id: 'Asset ID', m_FileID: 'File ID', m_PathID: 'Path ID',
+};
+const toggleFields = new Set(['isTemporary', 'hideInMenu', 'useWeaponDamage', 'endsTurn', 'canCrit', 'unearnable']);
+const fixedChoices = new Set([
+  'abilityType', 'abilityTypes', 'weaponType', 'targetFilter', 'bodyTypeFilter', 'affectedBodyTypes',
+  'seedType', 'tier', 'navMeshAgentId', 'allowedTypesForSlot', 'descriptionParser', 'descriptionParsers',
+  'parameterParser', 'aiAbilityClass', 'moveConfigurationName', 'barksID', 'vfxPrefix', 'modelOverride',
+]);
+const samples = new Map();
+const fieldLabel = key => categories[key] || key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replaceAll('_', ' ');
+const effectGroup = key => /instantEffects$/i.test(key) ? 'instantEffects'
+  : /statusEffects$/i.test(key) ? 'statusEffects' : key;
+function sampleKey(path, type) {
+  return type + ':' + path.map(effectGroup).join('.');
+}
+function indexSamples(value, path = []) {
+  const type = Array.isArray(value) ? 'array' : typeof value;
+  const key = sampleKey(path, type);
+  if (!samples.has(key)) samples.set(key, new Map());
+  const bucket = samples.get(key);
+  if (Array.isArray(value)) {
+    if (value.length && !bucket.size) bucket.set('entry', value[0]);
+    for (const entry of value) indexSamples(entry, [...path, '[]']);
+  } else if (type === 'object' && value !== null) {
+    if (Object.hasOwn(value, 'm_PathID')) {
+      bucket.set(JSON.stringify([value.m_FileID, value.m_PathID]), value);
+    } else {
+      for (const [field, entry] of Object.entries(value)) indexSamples(entry, [...path, field]);
+    }
+  } else if (type === 'number' || type === 'string') {
+    const field = path.at(-1) === '[]' ? path.at(-2) : path.at(-1);
+    if (field === 'key' || fixedChoices.has(field) || /key$/i.test(field)) bucket.set(value, value);
+  }
+}
+function knownValues(path, type) {
+  return [...(samples.get(sampleKey(path, type))?.values() || [])];
+}
+function availableAssets() {
+  return [...new Set([...Object.keys(records), ...changes.keys()])].map(id => [id, current(id)]);
+}
+function namedAsset(record) {
+  const key = localizedKeys(record).find(key => /_Title$|^ABILITY_NAME_|^EQUIPMENT_/i.test(key));
+  return key && translations[key] !== name(record) ? translations[key] + ' (' + name(record) + ')' : name(record);
+}
+function keyOptions(path, data) {
+  const host = path.at(-2) === '[]' ? path.at(-3) : path.at(-2);
+  let eligible;
+  if (host === 'prerequisites') {
+    eligible = record => record.kind === 'ClassPerksData' &&
+      ownerId(record) === data.ownerClass?.m_PathID && record.data.id !== data.id;
+  } else if (['abilities', 'baseAbilities', 'baseAbility', 'replacesAbility', 'psyAbility',
+              'disableAllButTheseAbilities'].includes(host)) {
+    eligible = record => abilityKinds.has(record.kind);
+  } else if (host === 'abilityUpgrades' || (host === 'upgrades' && path.length === 3)) {
+    eligible = record => record.kind === 'AbilityUpgradeData';
+  }
+  if (eligible) {
+    return [['', 'None'], ...availableAssets().filter(([, record]) => eligible(record))
+      .map(([, record]) => [record.data.id, namedAsset(record)])];
+  }
+  return knownValues(path, 'string').map(key => [key, key || 'None']);
+}
+function pointerOptions(path, data) {
+  const field = path.at(-1) === '[]' ? path.at(-2) : path.at(-1);
+  const known = field === 'perks' ? [] : knownValues(path, 'object');
+  const matching = record => {
+    if (field === 'ownerClass') return record.kind === 'ClassData';
+    if (field === 'abilities') return abilityKinds.has(record.kind);
+    if (field === 'abilityUpgrades') return record.kind === 'AbilityUpgradeData';
+    if (field === 'perks') return record.kind === 'ClassPerksData' && ownerId(record) === selected;
+    return false;
+  };
+  for (const [id, record] of Object.entries(records)) {
+    if (matching(record)) known.push({m_FileID: 0, m_PathID: id});
+  }
+  return [{m_FileID: 0, m_PathID: '0'}, ...known].map(pointer => {
+    const id = pointer.m_PathID;
+    const label = pointer.m_FileID ? 'External file ' + pointer.m_FileID + ', Path ID ' + id
+      : id === '0' ? 'None' : records[id] ? namedAsset(records[id]) : referenceNames[id] || id;
+    return [JSON.stringify([pointer.m_FileID, id]), label];
+  });
+}
+function showFields() {
+  assetForm.replaceChildren();
+  let data;
+  try { data = JSON.parse(fields.value); } catch { return; }
+  const sync = () => { fields.value = JSON.stringify(data, null, 2); };
+
+  function inputField(parent, caption, value, update, options = {}) {
+    const label = document.createElement('label');
+    label.textContent = caption;
+    const input = document.createElement('input');
+    input.type = typeof value === 'number' ? 'number' : 'text';
+    input.value = value;
+    input.readOnly = !!options.readOnly;
+    if (input.type === 'number') {
+      input.step = 'any';
+      input.required = true;
+    }
+    if (options.pathId) input.pattern = '-?[0-9]+';
+    input.oninput = () => {
+      if (!input.validity.valid) return;
+      update(input.type === 'number' ? input.valueAsNumber : input.value);
+      sync();
+    };
+    label.append(input);
+    parent.append(label);
+  }
+  function choiceField(parent, caption, value, options, update) {
+    const label = document.createElement('label');
+    label.textContent = caption;
+    const select = document.createElement('select');
+    const entries = new Map(options.map(([id, text]) => [String(id), text]));
+    if (!entries.has(String(value))) entries.set(String(value), String(value) || 'None');
+    const sorted = [...entries].sort((a, b) => a[1].localeCompare(b[1], undefined, {numeric: true}));
+    for (const [id, text] of sorted) select.add(new Option(text, id));
+    select.value = value;
+    select.onchange = () => { update(select.value); sync(); };
+    label.append(select);
+    parent.append(label);
+  }
+
+  function group(parent, caption) {
+    const box = document.createElement('fieldset');
+    const legend = document.createElement('legend');
+    legend.textContent = caption;
+    box.append(legend);
+    parent.append(box);
+    return box;
+  }
+  function action(parent, caption, run) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = caption;
+    button.onclick = run;
+    parent.append(button);
+  }
+  function render(parent, target, key, caption, path) {
+    const value = target[key];
+    if (Array.isArray(value)) {
+      const box = group(parent, caption);
+      const entryPath = [...path, '[]'];
+      value.forEach((item, index) => {
+        const row = group(box, 'Entry ' + (index + 1));
+        render(row, value, index, caption + ' ' + (index + 1), entryPath);
+        action(row, 'Remove entry ' + (index + 1), () => {
+          value.splice(index, 1);
+          sync();
+          showFields();
+        });
+      });
+      const sample = knownValues(path, 'array')[0];
+      const template = value.at(-1) ?? (sample && Object.keys(sample).length === 1 &&
+        typeof sample.key === 'string' ? {key: ''} : sample);
+      if (template !== undefined) {
+        const isKeyList = template && typeof template.key === 'string' && Object.keys(template).length === 1;
+        action(box, value.length && !isKeyList ? 'Duplicate last entry' : 'Add entry', () => {
+          value.push(isKeyList ? {key: ''} : structuredClone(template));
+          sync();
+          showFields();
+        });
+      } else {
+        const hint = document.createElement('small');
+        hint.textContent = 'Use Raw JSON to add an entry to this list.';
+        box.append(hint);
+      }
+    } else if (value !== null && typeof value === 'object') {
+      if (Object.hasOwn(value, 'm_PathID') && Object.hasOwn(value, 'm_FileID')) {
+        choiceField(parent, caption, JSON.stringify([value.m_FileID, value.m_PathID]),
+          pointerOptions(path, data), id => {
+            [value.m_FileID, value.m_PathID] = JSON.parse(id);
+            if (key === 'ownerClass') {
+              sync();
+              showFields();
+            }
+          });
+      } else if (Object.keys(value).length === 1 && typeof value.key === 'string') {
+        const options = keyOptions([...path, 'key'], data);
+        if (options.length) choiceField(parent, caption, value.key, options, id => { value.key = id; });
+        else inputField(parent, caption, value.key, id => { value.key = id; });
+      } else {
+        const box = group(parent, caption);
+        for (const subkey of Object.keys(value)) render(box, value, subkey, fieldLabel(subkey), [...path, subkey]);
+      }
+    } else if (typeof value === 'boolean' || (toggleFields.has(key) && [0, 1].includes(value))) {
+      const label = document.createElement('label');
+      const check = document.createElement('input');
+      check.type = 'checkbox';
+      check.checked = Boolean(value);
+      check.onchange = () => {
+        target[key] = typeof value === 'number' ? Number(check.checked) : check.checked;
+        sync();
+      };
+      label.append(check, caption);
+      parent.append(label);
+    } else if (typeof value === 'string' || typeof value === 'number') {
+      const observed = knownValues(path, typeof value);
+      const options = observed.map(entry => [entry, translations[entry] ?
+        translations[entry].replace(/\s+/g, ' ').slice(0, 90) + ' (' + entry + ')' : String(entry) || 'None']);
+      const update = updated => { target[key] = typeof value === 'number' ? Number(updated) : updated; };
+      if (options.length) choiceField(parent, caption, value, options, update);
+      else inputField(parent, caption, value, update,
+        {readOnly: target === data && ['id', 'm_Name'].includes(key), pathId: key === 'm_PathID'});
+    }
+  }
+  for (const key of Object.keys(data)) render(assetForm, data, key, fieldLabel(key), [key]);
+}
+assetForm.onsubmit = event => event.preventDefault();
+fields.oninput = showFields;
+function stageChange(asClone) {
+  try {
+    if (!assetForm.reportValidity()) return;
+    const data = JSON.parse(fields.value);
+    const previous = changes.get(selected);
+    const source = previous?.source || selected;
+    const original = records[source].data;
+    let id = selected;
+    if (asClone) {
+      const newId = cloneName.value.trim();
+      if (!/^[A-Za-z0-9_]+$/.test(newId)) throw Error('Enter a new ID using letters, digits and underscores.');
+      data.m_Name = data.id = newId;
+      id = 'clone:' + crypto.randomUUID();
+    } else {
+      const existing = current(selected).data;
+      if (existing.id !== data.id || existing.m_Name !== data.m_Name) throw Error('Use Stage clone to give an asset a new ID.');
+    }
+    if (Object.keys(original).sort().join() !== Object.keys(data).sort().join()) throw Error('Keep the original asset fields.');
+    changes.set(id, {source, data, clone: asClone || !!previous?.clone});
+    select(id);
+    if (asClone) cloneName.value = '';
+    feedback('Staged ' + data.m_Name);
+  } catch (error) { feedback(error.message); }
+}
+stage.onclick = () => stageChange(false);
+clone.onclick = () => stageChange(true);
+discard.onclick = () => {
+  const change = changes.get(selected);
+  changes.delete(selected);
+  select(change.source);
+  feedback('Staged change discarded.');
+};
+kind.onchange = owner.onchange = search.oninput = showAssets;
+async function exportChanges(saveLocally) {
+  if (fields.value !== baseline) { feedback('Stage or discard your current field changes before exporting.'); return; }
+  exporting = true;
+  feedback('Building and verifying bundle…');
+  try {
+    const response = await fetch(saveLocally ? '/apply' : '/export', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Editor-Token': token},
+      body: JSON.stringify([...changes.values()]),
+    });
+    if (!response.ok) throw Error(await response.text());
+    if (saveLocally) {
+      feedback('Saved verified bundle to ' + await response.text());
+      return;
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'data_assets';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    feedback('Verified bundle exported.');
+  } catch (error) { feedback(error.message); }
+  finally {
+    exporting = false;
+    exportButton.disabled = byId('apply').disabled = !changes.size;
+  }
+}
+exportButton.onclick = () => exportChanges(false);
+byId('apply').onclick = () => exportChanges(true);
+byId('openOutput').onclick = async () => {
+  try {
+    const response = await fetch('/open-output', {method: 'POST', headers: {'X-Editor-Token': token}});
+    byId('pathStatus').textContent = await response.text();
+  } catch (error) {
+    byId('pathStatus').textContent = error.message;
+  }
+};
+const patchEquipment = byId('patchEquipment');
+patchEquipment.onclick = async () => {
+  const patchStatus = byId('patchStatus');
+  patchEquipment.disabled = true;
+  patchStatus.textContent = 'Checking and patching GameAssembly.dll…';
+  try {
+    const response = await fetch('/patch/shared-equipment', {
+      method: 'POST', headers: {'X-Editor-Token': token, 'Content-Type': 'application/json'},
+      body: JSON.stringify({skipPrompt: byId('skipEquipmentPrompt').checked}),
+    });
+    const message = await response.text();
+    if (!response.ok) throw Error(message);
+    patchStatus.textContent = message;
+  } catch (error) {
+    patchStatus.textContent = error.message;
+  } finally {
+    patchEquipment.disabled = false;
+  }
+};
+(async () => {
+  if (location.protocol === 'file:') {
+    const link = document.createElement('a');
+    link.href = 'http://127.0.0.1:8765/';
+    link.textContent = 'Open the running editor';
+    status.replaceChildren(link, ' to load your assets.');
+    return;
+  }
+  try {
+    const response = await fetch('/catalog');
+    if (!response.ok) throw Error('Could not load the asset catalog (HTTP ' + response.status + ').');
+    const catalog = await response.json();
+    ({records, token, translations = {}, referenceNames = {}} = catalog);
+    if (catalog.paths) {
+      byId('gamePath').textContent = catalog.paths.game;
+      byId('outputPath').textContent = catalog.paths.output;
+      byId('openOutput').disabled = false;
+    }
+    patchEquipment.disabled = false;
+    for (const record of Object.values(records)) indexSamples(record.data);
+    byId('downloadText').hidden = Object.keys(translations).length === 0;
+    const owners = [...new Set(Object.values(records).filter(r => r.kind === 'ClassPerksData').map(ownerId))]
+      .filter(id => records[id]).sort((a, b) => name(records[a]).localeCompare(name(records[b])));
+    for (const id of owners) owner.add(new Option(name(records[id]), id));
+    showAssets();
+    feedback('Select an asset to start editing.');
+  } catch (error) { feedback(error.message); }
+})();
+</script>
+</html>
