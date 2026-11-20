@@ -35,7 +35,15 @@ def stage_windows(editor, wheels, runtime_zip):
 def stage_linux(editor, runtime_tar):
     with tarfile.open(runtime_tar) as runtime:
         runtime.extractall(editor.parent, filter="data")
-    (editor.parent / "python").rename(editor / "runtime")
+    bundled = editor / "runtime"
+    (editor.parent / "python").rename(bundled)
+    # The launcher uses the upstream standalone executable. Keep one copy
+    # because ZIP extraction would otherwise turn its aliases into full files.
+    for alias in ("python", "python3", "python3-config", "python3.14-config"):
+        (bundled / "bin" / alias).unlink(missing_ok=True)
+    for library in (bundled / "lib").glob("libpython*.so*"):
+        library.unlink()
+    shutil.rmtree(bundled / "include", ignore_errors=True)
     shutil.copytree(ROOT / "vendor", editor / "vendor",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "libfmod"))
 
