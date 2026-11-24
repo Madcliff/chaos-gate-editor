@@ -25,7 +25,7 @@ section { background: #191c23; border: 1px solid #373b46; border-radius: 8px; pa
 .node[aria-current="true"] { border-color: #e6b875; background: #3a3024; }
 #fields { width: 100%; min-height: 320px; height: 43vh; font: 13px ui-monospace, monospace; resize: vertical; }
 #cloneName { min-width: 0; flex: 1; }
-#status { min-height: 1.5em; overflow-wrap: anywhere; }
+#status { min-height: 1.5em; overflow-wrap: anywhere; white-space: pre-line; }
 .translation { white-space: pre-wrap; overflow-wrap: anywhere; }
 .translation small { display: block; color: #b8c0d1; }
 header a { color: #d9b680; }
@@ -40,6 +40,21 @@ label { display: block; margin: 8px 0; }
 summary { cursor: pointer; margin: 10px 0; }
 #patches { margin-bottom: 18px; }
 #pathsPanel code { overflow-wrap: anywhere; }
+#layout { margin-top: 16px; }
+#layout h2 small { color: #b8c0d1; font-weight: 400; font-size: 13px; }
+#grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; max-width: 980px; }
+.cell { min-height: 58px; border-radius: 6px; padding: 6px; font-size: 12px; overflow-wrap: anywhere; text-align: center; }
+.cell.perk { border: 1px solid hsl(var(--hue) 35% 45%); background: hsl(var(--hue) 30% 18%); }
+.cell.pending { border-style: dashed; border-width: 2px; cursor: pointer; }
+.cell.free { border: 1px dashed #484f5f; background: transparent; color: #8d95a6; }
+.cell.free[aria-pressed="true"] { border-color: #e6b875; color: #e6b875; }
+.cell small { display: block; color: #b8c0d1; }
+#placeForm { margin-top: 12px; max-width: 980px; }
+#pending ul { margin: 4px 0 10px; padding-left: 20px; }
+#pending li, #pending p { overflow-wrap: anywhere; font-size: 13px; }
+#pending h3 { font-size: 14px; margin: 8px 0 2px; color: #c9a877; }
+#placeForm label { display: inline-block; margin-right: 12px; min-width: 220px; }
+#placeForm select { width: 100%; }
 @media (max-width: 760px) { main { grid-template-columns: 1fr; } #assets { max-height: 44vh; } }
 </style>
 <header>
@@ -48,6 +63,7 @@ summary { cursor: pointer; margin: 10px 0; }
   <div class="actions">
     <button id="apply" class="primary" disabled>Save to output folder</button>
     <button id="export" disabled>Download bundle</button>
+    <button id="install" disabled>Install to game</button>
   </div>
 </header>
 <details id="pathsPanel">
@@ -55,7 +71,10 @@ summary { cursor: pointer; margin: 10px 0; }
   <section>
     <p>Game bundles <code id="gamePath"></code></p>
     <p>Output folder <code id="outputPath"></code></p>
+    <p>Skill-tree scene <code id="scenePath"></code></p>
+    <p>Install backups <code id="backupPath"></code></p>
     <button type="button" id="openOutput" disabled>Open output folder</button>
+    <button type="button" id="restore" disabled>Restore originals</button>
     <p id="pathStatus" role="status"></p>
     <p>Launch with <code>--browse</code> to choose and remember a different game folder.</p>
   </section>
@@ -83,6 +102,19 @@ summary { cursor: pointer; margin: 10px 0; }
   <select id="owner" aria-label="Class"></select>
   <input id="search" type="search" placeholder="Filter by name" aria-label="Filter by name">
 </div>
+<section id="layout" hidden aria-labelledby="layoutTitle">
+  <h2 id="layoutTitle">Tree layout <small id="layoutNote"></small></h2>
+  <div id="grid"></div>
+  <div id="placeForm" hidden>
+    <label>Perk to place <select id="placePerk"></select></label>
+    <label>Branch panel <select id="placeGroup"></select></label>
+    <label>Button style from <select id="placeTemplate"></select></label>
+    <div class="actions">
+      <button type="button" id="placeStage" class="primary">Stage placement</button>
+      <button type="button" id="placeCancel">Cancel</button>
+    </div>
+  </div>
+</section>
 <main>
   <section id="assets" aria-label="Assets"></section>
   <section>
@@ -103,14 +135,20 @@ summary { cursor: pointer; margin: 10px 0; }
       <button id="clone" disabled>Stage clone</button>
     </div>
     <p id="status" role="status">Loading assets…</p>
+    <details id="pendingPanel" open>
+      <summary>Pending output</summary>
+      <div id="pending" aria-live="polite"><p>Nothing staged.</p></div>
+    </details>
   </section>
 </main>
 <script>
 const byId = id => document.getElementById(id);
 const [kind, owner, search, assets, title, fields, stage, discard, cloneName, clone, status, exportButton, assetForm, jsonPanel] =
   ['kind','owner','search','assets','title','fields','stage','discard','cloneName','clone','status','export','assetForm','jsonPanel'].map(byId);
-let records, token, translations, referenceNames, selected, baseline, exporting = false;
+let records, token, translations, referenceNames, selected, baseline = '', exporting = false;
+let trees = {}, chosenCell = null, manifestPending = 0, planTimer, planRequest = 0;
 const changes = new Map();
+const placements = new Map();
 const name = record => record.data.m_Name;
 const ownerId = record => record.data.ownerClass?.m_PathID;
 const keys = (data, field) => (data[field] || []).map(item => item.key);
@@ -136,13 +174,157 @@ const current = id => {
   const original = records[change?.source || id];
   return change ? {kind: original.kind, data: change.data} : original;
 };
+const pendingCount = () => changes.size + placements.size;
+const canSave = () => !exporting && (pendingCount() > 0 || manifestPending > 0);
 function feedback(message = '') {
   status.textContent = message;
-  exportButton.textContent = 'Download bundle (' + changes.size + ')';
-  exportButton.disabled = byId('apply').disabled = exporting || !changes.size;
+  exportButton.textContent = 'Download (' + pendingCount() + ')';
+  exportButton.disabled = byId('apply').disabled = !canSave();
+  clearTimeout(planTimer);
+  if (token) planTimer = setTimeout(refreshPlan, 250);
 }
+function pendingList(heading, items, empty) {
+  const box = document.createElement('div');
+  const title = document.createElement('h3');
+  title.textContent = heading;
+  box.append(title);
+  if (!items.length) {
+    const none = document.createElement('p');
+    none.textContent = empty;
+    box.append(none);
+    return box;
+  }
+  const list = document.createElement('ul');
+  for (const item of items) {
+    const entry = document.createElement('li');
+    entry.textContent = item;
+    list.append(entry);
+  }
+  box.append(list);
+  return box;
+}
+async function refreshPlan() {
+  const request = ++planRequest;
+  const pending = byId('pending');
+  try {
+    const response = await fetch('/plan', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Editor-Token': token},
+      body: JSON.stringify({changes: [...changes.values()], placements: [...placements.values()]}),
+    });
+    if (!response.ok) throw Error(await response.text());
+    const plan = await response.json();
+    if (request !== planRequest) return;
+    manifestPending = plan.manifest.length;
+    const edits = [...changes.values()].map(c => (c.clone ? 'New ' : 'Edited ') + c.data.m_Name);
+    pending.replaceChildren(
+      pendingList('data_assets', edits, 'No asset changes.'),
+      pendingList('manifest.dat entries to add', plan.manifest, 'No new entries. Every asset is already listed.'),
+      pendingList('level5 tree buttons to add', plan.scene, 'No new tree buttons.'));
+    if (manifestPending && !pendingCount()) {
+      const hint = document.createElement('p');
+      hint.textContent = 'Some installed assets are missing from manifest.dat. Save to write a fixed copy.';
+      pending.append(hint);
+    }
+  } catch (error) {
+    if (request === planRequest) pending.textContent = 'Could not preview the output: ' + error.message;
+  }
+  exportButton.disabled = byId('apply').disabled = !canSave();
+}
+const className = () => records[owner.value]?.data.m_Name;
+function perkLabel(id) {
+  const title = translations['CLASS_PERK_' + id + '_Title'];
+  return title || id.replace(className() + '_', '');
+}
+function classPerks() {
+  return availableAssets().filter(([, record]) => record.kind === 'ClassPerksData' && ownerId(record) === owner.value)
+    .map(([id, record]) => ({id, perk: record.data.id}));
+}
+function showLayout() {
+  const layout = byId('layout');
+  const tree = trees[className()];
+  layout.hidden = kind.value !== 'ClassPerksData' || !tree;
+  if (layout.hidden) return;
+  const placed = [...placements.values()].filter(p => p.class === className());
+  byId('layoutNote').textContent = tree.nodes.length + ' buttons' + (placed.length ? ', ' + placed.length + ' staged' : '') +
+    '. Choose an empty cell to place a perk that has no button yet.';
+  const groupIndex = new Map(tree.groups.map((g, i) => [g.name, i]));
+  const hue = group => (groupIndex.get(group) * 40) % 360;
+  const near = (a, b) => Math.abs(a.x - b.x) <= 0.45 && Math.abs(a.y - b.y) <= 0.45;
+  const grid = byId('grid');
+  grid.replaceChildren();
+  for (const cell of tree.cells) {
+    const node = tree.nodes.find(n => near(n, cell));
+    const pending = placed.find(p => near(p, cell));
+    let element;
+    if (node || pending) {
+      element = document.createElement(pending ? 'button' : 'div');
+      const item = node || pending;
+      element.className = 'cell perk' + (pending ? ' pending' : '');
+      element.style.setProperty('--hue', hue(item.group));
+      element.textContent = perkLabel(item.perk);
+      const detail = document.createElement('small');
+      detail.textContent = pending ? 'Staged · click to remove' : item.perk;
+      element.append(detail);
+      element.title = item.perk + ' — ' + item.group;
+      if (pending) element.onclick = () => {
+        placements.delete(pending.perk);
+        showLayout();
+        feedback('Removed staged placement for ' + pending.perk);
+      };
+    } else if (cell.free) {
+      element = document.createElement('button');
+      element.type = 'button';
+      element.className = 'cell free';
+      element.textContent = '+';
+      element.setAttribute('aria-label', 'Place a perk at ' + cell.x + ', ' + cell.y);
+      element.setAttribute('aria-pressed', String(chosenCell === cell));
+      element.onclick = () => { chosenCell = cell; showPlaceForm(tree); showLayout(); };
+    } else {
+      element = document.createElement('div');
+      element.className = 'cell';
+    }
+    grid.append(element);
+  }
+}
+function showPlaceForm(tree) {
+  const form = byId('placeForm');
+  const onTree = new Set([...tree.nodes.map(n => n.perk), ...placements.keys()]);
+  // Default perks listed on the class are granted automatically and have no button.
+  const defaults = new Set((current(owner.value).data.perks || []).map(p => p.m_PathID));
+  const candidates = classPerks().filter(p => !onTree.has(p.perk) && !defaults.has(p.id))
+    .sort((a, b) => Number(changes.has(b.id)) - Number(changes.has(a.id)) || a.perk.localeCompare(b.perk));
+  const perkSelect = byId('placePerk'), groupSelect = byId('placeGroup'), templateSelect = byId('placeTemplate');
+  perkSelect.replaceChildren(...candidates.map(p => new Option(p.perk + (changes.has(p.id) ? ' (staged)' : ''), p.id)));
+  groupSelect.replaceChildren(...tree.groups.map(g => new Option(
+    (translations[g.title] || g.title) + ' (' + g.name.replace('Mounts_', '') + ')', g.name)));
+  groupSelect.value = chosenCell.group;
+  const nodesByPerk = new Map(tree.nodes.map(n => [n.perk, n]));
+  templateSelect.replaceChildren(...tree.nodes.map(n => new Option(perkLabel(n.perk) + ' (' + n.perk + ')', n.perk)));
+  const pickTemplate = () => {
+    const source = changes.get(perkSelect.value)?.source;
+    const sourcePerk = source && records[source]?.data.id;
+    templateSelect.value = nodesByPerk.has(sourcePerk) ? sourcePerk
+      : (tree.nodes.find(n => n.group === groupSelect.value) || tree.nodes[0]).perk;
+  };
+  perkSelect.onchange = pickTemplate;
+  pickTemplate();
+  byId('placeStage').disabled = !candidates.length;
+  form.hidden = false;
+  if (!candidates.length) feedback('Every ' + className() + ' perk already has a button. Clone a perk first, then place it.');
+}
+byId('placeCancel').onclick = () => { chosenCell = null; byId('placeForm').hidden = true; showLayout(); };
+byId('placeStage').onclick = () => {
+  const perk = current(byId('placePerk').value).data.id;
+  placements.set(perk, {class: className(), perk, template: byId('placeTemplate').value,
+                        group: byId('placeGroup').value, x: chosenCell.x, y: chosenCell.y});
+  chosenCell = null;
+  byId('placeForm').hidden = true;
+  showLayout();
+  feedback('Staged a button for ' + perk + '. Save to build the tree layout.');
+};
 function showAssets() {
   owner.hidden = kind.value !== 'ClassPerksData';
+  showLayout();
   assets.replaceChildren();
   const ids = [...new Set([...Object.keys(records), ...changes.keys()])]
     .filter(id => {
@@ -475,28 +657,42 @@ async function exportChanges(saveLocally) {
   try {
     const response = await fetch(saveLocally ? '/apply' : '/export', {
       method: 'POST', headers: {'Content-Type': 'application/json', 'X-Editor-Token': token},
-      body: JSON.stringify([...changes.values()]),
+      body: JSON.stringify({changes: [...changes.values()], placements: [...placements.values()]}),
     });
     if (!response.ok) throw Error(await response.text());
     if (saveLocally) {
-      feedback('Saved verified bundle to ' + await response.text());
+      feedback(await response.text());
+      byId('install').disabled = false;
       return;
     }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'data_assets';
+    link.download = response.headers.get('Content-Type') === 'application/zip' ? 'chaos-gate-mod.zip' : 'data_assets';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
     feedback('Verified bundle exported.');
   } catch (error) { feedback(error.message); }
   finally {
     exporting = false;
-    exportButton.disabled = byId('apply').disabled = !changes.size;
+    exportButton.disabled = byId('apply').disabled = !canSave();
   }
 }
 exportButton.onclick = () => exportChanges(false);
 byId('apply').onclick = () => exportChanges(true);
+async function gameFiles(path, question) {
+  if (!confirm(question)) return;
+  try {
+    const response = await fetch(path, {method: 'POST', headers: {'X-Editor-Token': token}});
+    const message = await response.text();
+    if (!response.ok) throw Error(message);
+    feedback(message);
+  } catch (error) { feedback(error.message); }
+}
+byId('install').onclick = () => gameFiles('/install',
+  'Close Chaos Gate first. Copy the saved output files into the game? The first install keeps a backup of each original.');
+byId('restore').onclick = () => gameFiles('/restore',
+  'Close Chaos Gate first. Restore the game files backed up by the first install?');
 byId('openOutput').onclick = async () => {
   try {
     const response = await fetch('/open-output', {method: 'POST', headers: {'X-Editor-Token': token}});
@@ -536,11 +732,13 @@ patchEquipment.onclick = async () => {
     const response = await fetch('/catalog');
     if (!response.ok) throw Error('Could not load the asset catalog (HTTP ' + response.status + ').');
     const catalog = await response.json();
-    ({records, token, translations = {}, referenceNames = {}} = catalog);
+    ({records, token, translations = {}, referenceNames = {}, trees = {}} = catalog);
     if (catalog.paths) {
       byId('gamePath').textContent = catalog.paths.game;
       byId('outputPath').textContent = catalog.paths.output;
-      byId('openOutput').disabled = false;
+      byId('scenePath').textContent = catalog.paths.scene || catalog.treeError || 'not found';
+      byId('backupPath').textContent = catalog.paths.backups;
+      byId('openOutput').disabled = byId('restore').disabled = byId('install').disabled = false;
     }
     patchEquipment.disabled = false;
     for (const record of Object.values(records)) indexSamples(record.data);

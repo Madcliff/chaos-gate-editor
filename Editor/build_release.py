@@ -54,8 +54,9 @@ def build(name, launcher, destination, stage):
         staging = Path(directory)
         editor = staging / "Editor"
         editor.mkdir()
-        for file in ("editor.py", "index.html", "README.md", "LICENSE", launcher):
+        for file in ("editor.py", "tree_layout.py", "index.html", "README.md", "LICENSE", launcher):
             shutil.copy2(ROOT / file, editor)
+        shutil.copytree(ROOT / "docs", editor / "docs")
         stage(editor)
         with ZipFile(archive, "w", ZIP_DEFLATED, compresslevel=6) as output:
             for file in sorted(editor.rglob("*")):

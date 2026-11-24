@@ -15,9 +15,12 @@ import secrets
 import platform
 import sys
 import shutil
+import struct
 import subprocess
 from tempfile import NamedTemporaryFile
 import webbrowser
+import zipfile
+from io import BytesIO
 
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
@@ -30,10 +33,17 @@ if VENDOR.is_dir():
 
 import UnityPy
 
+# The Windows embeddable runtime does not put the script folder on sys.path.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import tree_layout
+
 DEFAULT_GAME_DIR = Path.home() / ".local/share/Steam/steamapps/common/ChaosGate"
 BUNDLE_SUBDIR = Path("ChaosGate_Data/StreamingAssets/bundles")
 SETTINGS = ROOT / "chaos-gate.json"
 OUTPUT = ROOT / "out/data_assets"
+MANIFEST_OUTPUT = ROOT / "out/manifest.dat"
+INSTALL_BACKUPS = ROOT / "backups"
 PATCH_OUTPUT = ROOT / "out/shared-equipment/GameAssembly.dll"
 # Steam build 0706ef9. The IL2CPP method table maps KnightState.HandleEquipmentStealing
 # (Assembly-CSharp token 0x0600b66b) to this file offset.
@@ -148,6 +158,7 @@ class Bundle:
                  for r in self.records.values()}
         edited = set()
         expected = {}
+        self.added_paths = []
         for change in changes:
             source = change["source"]
             original = self.records[source]
@@ -174,6 +185,7 @@ class Bundle:
                 if path in paths:
                     raise ValueError(f"Bundle path already exists for {name}")
                 paths.add(path)
+                self.added_paths.append((path, name))
                 pid = int.from_bytes(sha256(path.encode()).digest()[:8], "big") & (2**63 - 1)
                 if not pid or pid in self.objects:
                     raise ValueError(f"PathID collision for {name}. Choose a different ID.")
@@ -201,6 +213,13 @@ class Bundle:
             expected[reader.path_id] = full
 
         self.validate_perks(changes)
+        self.final_perks = {}
+        for record in self.records.values():
+            if record["kind"] == "ClassPerksData":
+                self.final_perks[record["data"]["id"]] = record["data"]["ownerClass"]["m_PathID"]
+        for change in changes:
+            if self.records[change["source"]]["kind"] == "ClassPerksData":
+                self.final_perks[change["data"]["id"]] = change["data"]["ownerClass"]["m_PathID"]
         if any(c["clone"] for c in changes):
             container.sort(key=lambda item: item[0])
             self.index.save_typetree(index)
@@ -213,6 +232,168 @@ class Bundle:
             if index_check.assets_file.objects[pid].read_typetree() != data:
                 raise ValueError(f"Asset {pid} failed round-trip verification")
         return bundle
+
+
+def manifest_additions(bundle, clones=None):
+    """List (container path, asset name) for every data asset, including new clones.
+
+    clones lists (source PathID, new ID) for staged clones not yet exported; by
+    default the clones recorded by the last export are used.
+    """
+    index = bundle.index.read_typetree()
+    names = dict(bundle.reference_names)
+    pending = [(path, name) for path, name in getattr(bundle, "added_paths", [])]
+    entries = {}
+    for path, entry in index["m_Container"]:
+        asset = entry["asset"]
+        if not asset["m_FileID"]:
+            entries[str(asset["m_PathID"])] = path
+            if str(asset["m_PathID"]) in names:
+                pending.append((path, names[str(asset["m_PathID"])]))
+    for source, name in clones or []:
+        template = entries.get(str(source))
+        if template:
+            pending.append((f'{template.rsplit("/", 1)[0]}/{name.lower()}.asset', name))
+    return pending
+
+
+def plan_outputs(bundle, manifest_path, payload):
+    """Describe what a save would write, without building anything."""
+    if isinstance(payload, list):
+        payload = {"changes": payload, "placements": []}
+    changes = payload.get("changes", []) if isinstance(payload, dict) else []
+    placements = payload.get("placements", []) if isinstance(payload, dict) else []
+    if not isinstance(changes, list) or not isinstance(placements, list):
+        raise ValueError("Expected staged changes and tree placements")
+    clones = [(c["source"], c["data"]["id"]) for c in changes
+              if isinstance(c, dict) and c.get("clone") and isinstance(c.get("data"), dict)
+              and isinstance(c["data"].get("id"), str)]
+    manifest = []
+    if manifest_path.is_file():
+        _, manifest = tree_layout.add_manifest_paths(manifest_path.read_bytes(),
+                                                     manifest_additions(bundle, clones))
+    return {"data": len(changes), "manifest": manifest,
+            "scene": [f'{p.get("perk")} → {p.get("class")} / {p.get("group")} at ({p.get("x")}, {p.get("y")})'
+                      for p in placements if isinstance(p, dict)]}
+
+
+class Outputs(dict):
+    added_manifest = ()
+
+
+def build_outputs(source, scene_path, payload):
+    """Build the data bundle and, when needed, manifest.dat and the tree scene.
+
+    Returns {filename: bytes} for each file that differs from the installed game.
+    """
+    if isinstance(payload, list):
+        payload = {"changes": payload, "placements": []}
+    if not isinstance(payload, dict) or not isinstance(payload.get("changes"), list) \
+            or not isinstance(payload.get("placements", []), list):
+        raise ValueError("Expected staged changes and tree placements")
+    changes, placements = payload["changes"], payload.get("placements", [])
+    bundle = Bundle(source)
+    outputs = Outputs(data_assets=bundle.export(changes))
+    manifest_path = source.parent / "manifest.dat"
+    if manifest_path.is_file():
+        manifest = manifest_path.read_bytes()
+        updated, added = tree_layout.add_manifest_paths(manifest, manifest_additions(bundle))
+        if updated != manifest:
+            outputs["manifest.dat"] = updated
+            outputs.added_manifest = added
+    elif any(change.get("clone") for change in changes):
+        raise ValueError(f"Cloned assets need manifest.dat, which was not found at {manifest_path}")
+    if placements:
+        if not scene_path:
+            raise ValueError("The skill-tree scene was not found in this installation")
+        classes = {pid: r["data"]["m_Name"] for pid, r in bundle.records.items() if r["kind"] == "ClassData"}
+        scene = tree_layout.TreeScene(scene_path)
+        written = {}
+        for placement in placements:
+            if not isinstance(placement, dict):
+                raise ValueError("Invalid tree placement")
+            perk, class_name = placement.get("perk"), placement.get("class")
+            owner = bundle.final_perks.get(perk)
+            if owner is None:
+                raise ValueError(f"Tree placement {perk} has no matching perk asset")
+            if classes.get(owner) != class_name:
+                raise ValueError(f"{perk} belongs to {classes.get(owner, 'another class')}, not {class_name}")
+            x, y = placement.get("x"), placement.get("y")
+            if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (x, y)):
+                raise ValueError(f"Invalid position for {perk}")
+            written.update(scene.add_node(class_name, perk, placement.get("template"),
+                                          placement.get("group"), float(x), float(y)))
+        outputs[scene_path.name] = scene.save(written)
+    return outputs
+
+
+def output_files(outputs):
+    """Write outputs to the output folder and clear stale ones from earlier saves."""
+    folder = OUTPUT.parent
+    for stale in (folder / "manifest.dat", *folder.glob("level[0-9]*")):
+        if stale.is_file() and stale.name not in outputs:
+            stale.unlink()
+    for filename, content in outputs.items():
+        write_atomic(folder / filename, content)
+    return [str(folder / filename) for filename in outputs]
+
+
+def game_running():
+    if sys.platform == "win32":
+        result = subprocess.run(["tasklist", "/FI", "IMAGENAME eq ChaosGate.exe", "/NH"],
+                                capture_output=True, text=True)
+        return "chaosgate.exe" in result.stdout.lower()
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            args = cmdline.read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if any(arg.replace(b"\\", b"/").rsplit(b"/", 1)[-1].lower() == b"chaosgate.exe" for arg in args):
+            return True
+    return False
+
+
+def install_targets(source, scene_path):
+    targets = {"data_assets": source, "manifest.dat": source.parent / "manifest.dat"}
+    if scene_path:
+        targets[scene_path.name] = scene_path
+    return targets
+
+
+def install_outputs(source, scene_path):
+    """Copy saved outputs into the game, backing up each original once."""
+    if game_running():
+        raise ValueError("Close Chaos Gate before installing.")
+    folder = OUTPUT.parent
+    installed = []
+    for filename, target in install_targets(source, scene_path).items():
+        output = folder / filename
+        if not output.is_file():
+            continue
+        backup = INSTALL_BACKUPS / filename
+        if not backup.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(target, backup)
+        if target.read_bytes() != output.read_bytes():
+            write_atomic(target, output.read_bytes())
+            installed.append(filename)
+    if not installed:
+        return "The game already matches the saved output. Save to output folder first."
+    return f"Installed {', '.join(installed)}. Originals are kept in {INSTALL_BACKUPS}. Restart the editor to edit the installed files."
+
+
+def restore_originals(source, scene_path):
+    if game_running():
+        raise ValueError("Close Chaos Gate before restoring.")
+    restored = []
+    for filename, target in install_targets(source, scene_path).items():
+        backup = INSTALL_BACKUPS / filename
+        if backup.is_file() and backup.read_bytes() != target.read_bytes():
+            write_atomic(target, backup.read_bytes())
+            restored.append(filename)
+    if not restored:
+        return "No backups differ from the installed files."
+    return f"Restored {', '.join(restored)} from {INSTALL_BACKUPS}. Restart the editor to reload them."
 
 
 def read_localization(source):
@@ -232,6 +413,8 @@ def write_atomic(path, content):
         try:
             temporary.write(content)
             temporary.close()
+            if path.exists():
+                pending.chmod(path.stat().st_mode & 0o777)
             pending.replace(path)
         finally:
             pending.unlink(missing_ok=True)
@@ -307,9 +490,18 @@ def serve(source, port, localization, open_browser=False):
     token = secrets.token_urlsafe()
     rows = read_localization(localization)
     translations = {row["id"]: row["translation"] for row in rows}
+    scene_path, trees, tree_error = None, {}, ""
+    data_dir = source.parent.parent.parent
+    if (source.parent.parent / "bundles") == source.parent and data_dir.is_dir():
+        scene_path = tree_layout.find_scene(data_dir)
+    try:
+        trees = tree_layout.TreeScene(scene_path).summary() if scene_path else {}
+    except (ValueError, KeyError, struct.error) as error:
+        scene_path, tree_error = None, f"Skill-tree layout unavailable: {error}"
     catalog = json.dumps({"records": records, "token": token, "translations": translations,
-                          "referenceNames": database.reference_names,
-                          "paths": {"game": str(source.parent), "output": str(OUTPUT.parent)}}).encode()
+                          "referenceNames": database.reference_names, "trees": trees, "treeError": tree_error,
+                          "paths": {"game": str(source.parent), "output": str(OUTPUT.parent),
+                                    "scene": str(scene_path or ""), "backups": str(INSTALL_BACKUPS)}}).encode()
     localization_json = json.dumps(rows, ensure_ascii=False, indent=2).encode()
     bundles = source.parent
     assembly = bundles / "GameAssembly.dll"
@@ -341,7 +533,8 @@ def serve(source, port, localization, open_browser=False):
                 self.send_error(404)
 
         def do_POST(self):
-            if self.path not in {"/export", "/apply", "/patch/shared-equipment", "/open-output"}:
+            if self.path not in {"/export", "/apply", "/patch/shared-equipment", "/open-output",
+                                 "/install", "/restore", "/plan"}:
                 self.send_error(404)
                 return
             if self.headers.get("X-Editor-Token") != token:
@@ -360,6 +553,17 @@ def serve(source, port, localization, open_browser=False):
                                          stderr=subprocess.DEVNULL, start_new_session=True)
                     self.reply(200, b"Opened output folder", "text/plain; charset=utf-8")
                     return
+                if self.path == "/plan":
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 8_000_000:
+                        raise ValueError("Invalid plan size")
+                    plan = plan_outputs(database, source.parent / "manifest.dat", json.loads(self.rfile.read(size)))
+                    self.reply(200, json.dumps(plan).encode(), "application/json")
+                    return
+                if self.path in {"/install", "/restore"}:
+                    action = install_outputs if self.path == "/install" else restore_originals
+                    self.reply(200, action(source, scene_path).encode(), "text/plain; charset=utf-8")
+                    return
                 if self.path == "/patch/shared-equipment":
                     size = int(self.headers.get("Content-Length", "0"))
                     if not 0 <= size <= 1024:
@@ -373,18 +577,27 @@ def serve(source, port, localization, open_browser=False):
                 size = int(self.headers.get("Content-Length", "0"))
                 if not 0 < size <= 8_000_000:
                     raise ValueError("Invalid export size")
-                changes = json.loads(self.rfile.read(size))
-                bundle = Bundle(source).export(changes)
+                outputs = build_outputs(source, scene_path, json.loads(self.rfile.read(size)))
                 if self.path == "/apply":
-                    if OUTPUT.resolve() == source:
-                        raise ValueError("Output points to the source bundle. Use Download bundle instead.")
-                    write_atomic(OUTPUT, bundle)
-                    self.reply(200, str(OUTPUT).encode(), "text/plain; charset=utf-8")
+                    if OUTPUT.parent.resolve() == source.parent.resolve():
+                        raise ValueError("Output points to the game folder. Use Download instead.")
+                    written = output_files(outputs)
+                    message = "Saved verified files:\n" + "\n".join(written)
+                    if outputs.added_manifest:
+                        message += "\n\nmanifest.dat entries added:\n" + "\n".join(outputs.added_manifest)
+                    self.reply(200, message.encode(), "text/plain; charset=utf-8")
                     return
             except Exception as exc:
                 self.reply(400, str(exc).encode(), "text/plain; charset=utf-8")
                 return
-            self.reply(200, bundle, "application/octet-stream", "data_assets")
+            if len(outputs) == 1:
+                self.reply(200, outputs["data_assets"], "application/octet-stream", "data_assets")
+                return
+            archive = BytesIO()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+                for filename, content in outputs.items():
+                    package.writestr(filename, content)
+            self.reply(200, archive.getvalue(), "application/zip", "chaos-gate-mod.zip")
 
     with HTTPServer(("127.0.0.1", port), Handler) as server:
         show_url(server.server_port, open_browser)
